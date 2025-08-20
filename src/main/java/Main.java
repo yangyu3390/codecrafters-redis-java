@@ -28,7 +28,7 @@ class ClientHandler implements Runnable {
           // This is RESP metadata, ignore it
           continue;
         }
-        if (fromUser.equalsIgnoreCase("ECHO")) {
+        else if (fromUser.equalsIgnoreCase("ECHO")) {
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -36,9 +36,11 @@ class ClientHandler implements Runnable {
             }
             String resp = "+" + fromUser + "\r\n";
             outputStream.write(resp.getBytes());
+            outputStream.flush();
+            break;
           }
         }
-        if (fromUser.equalsIgnoreCase("SET")) {
+        else if (fromUser.equalsIgnoreCase("SET")) {
           boolean keyFound = false;
           String key = null;
           String value;
@@ -51,22 +53,28 @@ class ClientHandler implements Runnable {
               keyFound = true;
               key = fromUser;
             } else {
-              value = fromUser;
+              value = "$" + Integer.toString(fromUser.length()) + "\r\n" + fromUser + "\r\n";
               map.put(key, value);
+              System.out.println("!!!set value "+ value);
+              System.out.println("!!!get "+ map.get(key));
               String resp = "+OK\r\n";
               outputStream.write(resp.getBytes());
+              outputStream.flush();
+              break;
             }
           }
         }
-        if (fromUser.equalsIgnoreCase("GET")) {
+        else if (fromUser.equalsIgnoreCase("GET")) {
+          String value;
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
               continue;
             }
-            String value = map.getOrDefault(fromUser, "$-1\r\n");
-            String resp = "$" + Integer.toString(value.length()) + "\r\n" + value + "\r\n";
-            outputStream.write(resp.getBytes());
+            value = map.getOrDefault(fromUser, "$-1\r\n");
+            outputStream.write(value.getBytes());
+            outputStream.flush();
+            break;
           }
         }
       }
