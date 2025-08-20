@@ -1,13 +1,15 @@
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.HashMap;
+import java.util.Map;
 
 class ClientHandler implements Runnable {
   private Socket socket;
+  private Map<String, String> map = new HashMap<>();
   public ClientHandler(Socket socket) {
     this.socket = socket;
   }
@@ -35,8 +37,37 @@ class ClientHandler implements Runnable {
             String resp = "+" + fromUser + "\r\n";
             outputStream.write(resp.getBytes());
           }
-          // String[] parts = fromUser.split("\\s+", 2);  // split on one or more spaces, max 2 parts
-          // String argument = parts.length > 1 ? parts[1] : "";  // "xxx"
+        }
+        if (fromUser.equalsIgnoreCase("SET")) {
+          boolean keyFound = false;
+          String key = null;
+          String value;
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+            if (!keyFound) {
+              keyFound = true;
+              key = fromUser;
+            } else {
+              value = fromUser;
+              map.put(key, value);
+              String resp = "+OK\r\n";
+              outputStream.write(resp.getBytes());
+            }
+          }
+        }
+        if (fromUser.equalsIgnoreCase("GET")) {
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+            String value = map.getOrDefault(fromUser, "$-1\r\n");
+            String resp = "$" + Integer.toString(value.length()) + "\r\n" + value + "\r\n";
+            outputStream.write(resp.getBytes());
+          }
         }
       }
     } catch (IOException e) {
