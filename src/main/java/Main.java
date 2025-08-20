@@ -12,34 +12,22 @@ class ClientHandler implements Runnable {
     this.socket = socket;
   }
   @Override
-    public void run() {
-      BufferedReader in = null;
-      try {
-        in = new BufferedReader(
-        new InputStreamReader(socket.getInputStream()));
-      } catch (IOException e) {
-        // TODO Auto-generated catch block
-        e.printStackTrace();
-      }
-      OutputStream outputStream = null;
-      try {
-        outputStream = socket.getOutputStream();
-      } catch (IOException e) {
-        // TODO Auto-generated catch block
-        e.printStackTrace();
-      }
-      String fromUser;      
-        try {
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.equalsIgnoreCase("PING")) {
-              outputStream.write("+PONG\r\n".getBytes());
-            }
-          }
-        } catch (IOException e) {
-          // TODO Auto-generated catch block
-          e.printStackTrace();
+  public void run() {    
+    try (
+      BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+      OutputStream outputStream = socket.getOutputStream();
+    ) {
+      String fromUser;     
+      while ((fromUser=in.readLine())!=null) {
+        if (fromUser.equalsIgnoreCase("PING")) {
+          outputStream.write("+PONG\r\n".getBytes());
         }
+      }
+    } catch (IOException e) {
+      // TODO Auto-generated catch block
+      e.printStackTrace();
     }
+  }
 }
 public class Main {
   public static void main(String[] args){
@@ -59,21 +47,8 @@ public class Main {
         
         while (true) {
           clientSocket = serverSocket.accept();
-        //   Thread t1 = new Thread(() -> {
-        //     BufferedReader in = new BufferedReader(
-        //     new InputStreamReader(clientSocket.getInputStream()));
-        //     OutputStream outputStream = clientSocket.getOutputStream();
-        //     String fromUser;
-            
-        //     while ((fromUser=in.readLine())!=null) {
-        //       if (fromUser.equalsIgnoreCase("PING")) {
-        //         outputStream.write("+PONG\r\n".getBytes());
-        //       }
-        //     }
-        // });
-        // t1.start();
-        Thread clientThread = new Thread(new ClientHandler(clientSocket));
-        clientThread.start();
+          Thread clientThread = new Thread(new ClientHandler(clientSocket));
+          clientThread.start();
         }
        } catch (IOException e) {
          System.out.println("IOException: " + e.getMessage());
