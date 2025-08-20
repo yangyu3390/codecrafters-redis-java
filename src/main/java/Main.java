@@ -22,6 +22,22 @@ class ClientHandler implements Runnable {
         if (fromUser.equalsIgnoreCase("PING")) {
           outputStream.write("+PONG\r\n".getBytes());
         }
+        if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+          // This is RESP metadata, ignore it
+          continue;
+        }
+        if (fromUser.equalsIgnoreCase("ECHO")) {
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+            String resp = "+" + fromUser + "\r\n";
+            outputStream.write(resp.getBytes());
+          }
+          // String[] parts = fromUser.split("\\s+", 2);  // split on one or more spaces, max 2 parts
+          // String argument = parts.length > 1 ? parts[1] : "";  // "xxx"
+        }
       }
     } catch (IOException e) {
       // TODO Auto-generated catch block
