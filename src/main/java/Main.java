@@ -6,13 +6,25 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
+import java.time.Instant;
 
 class ClientHandler implements Runnable {
   private Socket socket;
   private Map<String, String> map = new HashMap<>();
+  
   public ClientHandler(Socket socket) {
     this.socket = socket;
   }
+
+  static class Expiry {
+      long timestamp;
+      long durationMs;
+      Expiry(long timestamp, long durationMs) {
+          this.timestamp = timestamp;
+          this.durationMs = durationMs;
+      }
+  }
+  private Map<String, Expiry> time = new HashMap<>();
   @Override
   public void run() {    
     try (
@@ -20,15 +32,19 @@ class ClientHandler implements Runnable {
       OutputStream outputStream = socket.getOutputStream();
     ) {
       String fromUser;     
+      int argVar = 0;
       while ((fromUser=in.readLine())!=null) {
-        if (fromUser.equalsIgnoreCase("PING")) {
-          outputStream.write("+PONG\r\n".getBytes());
-        }
+        
         if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
           // This is RESP metadata, ignore it
+          if (fromUser.startsWith("*")) {
+            // minus 1 for the SET command
+            argVar = Integer.parseInt(fromUser.substring(1))-1;
+          }
           continue;
-        }
-        else if (fromUser.equalsIgnoreCase("ECHO")) {
+        } else if (fromUser.equalsIgnoreCase("PING")) {
+          outputStream.write("+PONG\r\n".getBytes());
+        } else if (fromUser.equalsIgnoreCase("ECHO")) {
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -39,9 +55,10 @@ class ClientHandler implements Runnable {
             outputStream.flush();
             break;
           }
-        }
-        else if (fromUser.equalsIgnoreCase("SET")) {
+        } else if (fromUser.equalsIgnoreCase("SET")) {
           boolean keyFound = false;
+          boolean valueFound = false;
+          boolean pxFound = false;
           String key = null;
           String value;
           while ((fromUser=in.readLine())!=null) {
@@ -50,21 +67,35 @@ class ClientHandler implements Runnable {
               continue;
             }
             if (!keyFound) {
+              argVar -= 1;
               keyFound = true;
               key = fromUser;
-            } else {
+            } else if (!valueFound){
+              argVar -= 1;
+              valueFound = true;
               value = "$" + Integer.toString(fromUser.length()) + "\r\n" + fromUser + "\r\n";
               map.put(key, value);
-              System.out.println("!!!set value "+ value);
-              System.out.println("!!!get "+ map.get(key));
+              // System.out.println("!!!set value "+ value);
+              // System.out.println("!!!get "+ map.get(key));
               String resp = "+OK\r\n";
               outputStream.write(resp.getBytes());
               outputStream.flush();
+              
+              if (argVar == 0) {
+                break;
+              }
+            } else if (!pxFound && fromUser.equalsIgnoreCase("px")) {
+              pxFound = true;
+              argVar -= 1;
+            } else if (pxFound && argVar==1) {
+              argVar -= 1;
+              long duration = Integer.parseInt(fromUser.substring(0));
+              long now = System.currentTimeMillis();
+              time.put(key, new Expiry(now, duration));
               break;
             }
           }
-        }
-        else if (fromUser.equalsIgnoreCase("GET")) {
+        } else if (fromUser.equalsIgnoreCase("GET")) {
           String value;
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
@@ -72,6 +103,20 @@ class ClientHandler implements Runnable {
               continue;
             }
             value = map.getOrDefault(fromUser, "$-1\r\n");
+            if (!value.equals("$-1\r\n")) {
+              Expiry ex = time.get(fromUser);
+              if (ex != null) {
+                long timestamp = ex.timestamp;
+                long durationMs = ex.durationMs;
+                long currentTime = System.currentTimeMillis();
+                if (currentTime > timestamp + durationMs) {
+                    System.out.println("Expired");
+                    value = "$-1\r\n";
+                } else {
+                    System.out.println("Still valid");
+                }
+              }
+            }
             outputStream.write(value.getBytes());
             outputStream.flush();
             break;
