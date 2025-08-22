@@ -7,14 +7,19 @@ import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Stack;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Deque;
 
 class ClientHandler implements Runnable {
   private Socket socket;
-  private Map<String, String> map = new HashMap<>();
-  private Map<String, Stack<String>> rmap = new HashMap<>();
+  private static final Map<String, String> map = new ConcurrentHashMap<>();
+  private static final Map<String, Stack<String>> rmap = new ConcurrentHashMap<>();
+  static final ReentrantLock lock = new ReentrantLock();
+  static final Condition notEmpty = lock.newCondition();
   public ClientHandler(Socket socket) {
     this.socket = socket;
   }
@@ -126,6 +131,8 @@ class ClientHandler implements Runnable {
           }
         } else if (fromUser.equalsIgnoreCase("RPUSH")) {
           String firstKey = null;
+          lock.lock();
+          
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -145,11 +152,17 @@ class ClientHandler implements Runnable {
               String res = ":" + Integer.toString(rmap.get(firstKey).size())+"\r\n";
               outputStream.write(res.getBytes());
               outputStream.flush();
+              try {
+                notEmpty.signalAll(); // wake up all waiting threads
+              } finally {
+                  lock.unlock();
+              }
               break;
             }
           }
         } else if (fromUser.equalsIgnoreCase("LPUSH")) {
           String firstKey = null;
+          lock.lock();
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -169,6 +182,11 @@ class ClientHandler implements Runnable {
               String res = ":" + Integer.toString(rmap.get(firstKey).size())+"\r\n";
               outputStream.write(res.getBytes());
               outputStream.flush();
+              try {
+                notEmpty.signalAll(); // wake up all waiting threads
+              } finally {
+                  lock.unlock();
+              }
               break;
             }
           }
@@ -178,6 +196,7 @@ class ClientHandler implements Runnable {
           String endIdx = null;
           String key = null;
           int listLen = 0;
+          lock.lock();
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -205,6 +224,9 @@ class ClientHandler implements Runnable {
               if (Integer.parseInt(startIdx)>=listLen) {
                 outputStream.write(empty.getBytes());
                 outputStream.flush();
+                
+                lock.unlock();
+                
                 break;
               }
               
@@ -224,6 +246,9 @@ class ClientHandler implements Runnable {
               if (Integer.parseInt(startIdx) > Integer.parseInt(endIdx)) {
                 outputStream.write(empty.getBytes());
                 outputStream.flush();
+                
+                lock.unlock();
+                
                 break;
               }
               int startIntIdx = Integer.parseInt(startIdx);
@@ -239,10 +264,14 @@ class ClientHandler implements Runnable {
               }
               outputStream.write(res.toString().getBytes());
               outputStream.flush();
+              
+              lock.unlock();
+              
               break;
             }
           }
         } else if (fromUser.equalsIgnoreCase("LLEN")) {
+          lock.lock();
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -252,17 +281,22 @@ class ClientHandler implements Runnable {
             if (!rmap.containsKey(fromUser)) {
               outputStream.write(":0\r\n".getBytes());
               outputStream.flush();
+              
+              lock.unlock();
+              
               break;
             } else {
               int len = rmap.get(fromUser).size();
               outputStream.write((":" + len + "\r\n").getBytes());
               outputStream.flush();
+              lock.unlock();
               break;
             } 
           }
         } else if (fromUser.equalsIgnoreCase("LPOP")) {
           String key = null;
           String len = null;
+          lock.lock();
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -274,6 +308,7 @@ class ClientHandler implements Runnable {
               if (!rmap.containsKey(key) || rmap.get(key).size()==0) {
                 outputStream.write("$-1\r\n".getBytes());
                 outputStream.flush();
+                lock.unlock();
                 break;
               } 
               argVar -= 1;
@@ -282,6 +317,7 @@ class ClientHandler implements Runnable {
                 rmap.get(key).removeFirst();
                 outputStream.write(("$"+val.length()+"\r\n"+val+"\r\n").getBytes());
                 outputStream.flush();
+                lock.unlock();
                 break;
               }
             } else if (key != null && len == null) {
@@ -299,6 +335,52 @@ class ClientHandler implements Runnable {
               }
               outputStream.write(res.toString().getBytes());
               outputStream.flush();
+              lock.unlock();
+              break;
+            }
+          }
+        } else if (fromUser.equalsIgnoreCase("BLPOP")) {
+          String key = null;
+          String timeout = null;
+          lock.lock();
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+            if (key == null) {
+              key = fromUser;
+              // if (!rmap.containsKey(key) || rmap.get(key).size()==0) {
+              //   outputStream.write("$-1\r\n".getBytes());
+              //   outputStream.flush();
+              //   break;
+              // } 
+            } else if (key != null && timeout == null) {
+              timeout = fromUser;
+              double doubleTimeout = Double.parseDouble(timeout);
+              while (!rmap.containsKey(key)){
+                if (doubleTimeout-0.0 < 0.0000001) {
+                  try {
+                    notEmpty.await();
+                  } catch (InterruptedException e) {
+                    // TODO Auto-generated catch block
+                    e.printStackTrace();
+                  } // 
+                } else {
+                  try {
+                    notEmpty.awaitNanos((long)(doubleTimeout * 1_000_000_000L));
+                  } catch (InterruptedException e) {
+                    // TODO Auto-generated catch block
+                    e.printStackTrace();
+                  }
+                }
+              }
+              
+              String res = rmap.get(key).pop();
+              int resLen = res.length();
+              
+              outputStream.write(("*2\r\n"+"$"+key.length()+"\r\n"+key+"\r\n"+"$"+resLen+"\r\n"+res+"\r\n").getBytes());
+              outputStream.flush();
               break;
             }
           }
@@ -314,7 +396,7 @@ public class Main {
   public static void main(String[] args){
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     System.out.println("Logs from your program will appear here!");
-
+    
     //  Uncomment this block to pass the first stage
        ServerSocket serverSocket = null;
        Socket clientSocket = null;
