@@ -151,6 +151,7 @@ class ClientHandler implements Runnable {
           String startIdx = null;
           String endIdx = null;
           String key = null;
+          int listLen = 0;
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
@@ -164,17 +165,35 @@ class ClientHandler implements Runnable {
                 outputStream.flush();
                 break;
               }
+              listLen = rmap.get(key).size();
             } else if (startIdx == null) {
               startIdx = fromUser;
-              if (Integer.parseInt(startIdx)>=rmap.get(key).size()) {
+              if (Integer.parseInt(startIdx) < 0) {
+                if (-Integer.parseInt(startIdx)>=listLen) {
+                  startIdx = "0";
+                } else {
+                  int len = Integer.parseInt(startIdx) + listLen;
+                  startIdx = Integer.toString(len);
+                }
+              }
+              if (Integer.parseInt(startIdx)>=listLen) {
                 outputStream.write(empty.getBytes());
                 outputStream.flush();
                 break;
               }
+              
             } else if (endIdx == null) {
               endIdx = fromUser;
-              if (Integer.parseInt(endIdx)>=rmap.get(key).size()) {
-                endIdx = Integer.toString(rmap.get(key).size()-1);
+              if (Integer.parseInt(endIdx) < 0) {
+                if (-Integer.parseInt(endIdx)>=listLen) {
+                  endIdx = "0";
+                } else {
+                  int len = Integer.parseInt(endIdx) + listLen;
+                  endIdx = Integer.toString(len);
+                }
+              }
+              if (Integer.parseInt(endIdx)>=listLen) {
+                endIdx = Integer.toString(listLen-1);
               } 
               if (Integer.parseInt(startIdx) > Integer.parseInt(endIdx)) {
                 outputStream.write(empty.getBytes());
