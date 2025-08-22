@@ -146,6 +146,58 @@ class ClientHandler implements Runnable {
               break;
             }
           }
+        } else if (fromUser.equalsIgnoreCase("LRANGE")) {
+          String empty = "*0\r\n";
+          String startIdx = null;
+          String endIdx = null;
+          String key = null;
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+            
+            if (key == null) {
+              key = fromUser;
+              if (!rmap.containsKey(fromUser)) {
+                outputStream.write(empty.getBytes());
+                outputStream.flush();
+                break;
+              }
+            } else if (startIdx == null) {
+              startIdx = fromUser;
+              if (Integer.parseInt(startIdx)>=rmap.get(key).size()) {
+                outputStream.write(empty.getBytes());
+                outputStream.flush();
+                break;
+              }
+            } else if (endIdx == null) {
+              endIdx = fromUser;
+              if (Integer.parseInt(endIdx)>=rmap.get(key).size()) {
+                endIdx = Integer.toString(rmap.get(key).size()-1);
+              } 
+              if (Integer.parseInt(startIdx) > Integer.parseInt(endIdx)) {
+                outputStream.write(empty.getBytes());
+                outputStream.flush();
+                break;
+              }
+              int startIntIdx = Integer.parseInt(startIdx);
+              int endIntIdx = Integer.parseInt(endIdx);
+              StringBuilder res = new StringBuilder();
+              int len = endIntIdx - startIntIdx + 1;
+              res.append("*"+len+"\r\n");
+              for(int i = startIntIdx; i <= endIntIdx; i++) {
+                String val = rmap.get(key).get(i);
+                int valLen = val.length();
+                res.append("$"+valLen+"\r\n");
+                res.append(val+"\r\n");
+              }
+              outputStream.write(res.toString().getBytes());
+              outputStream.flush();
+              break;
+            }
+
+          }
         }
       }
     } catch (IOException e) {
