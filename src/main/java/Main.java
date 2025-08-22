@@ -261,23 +261,46 @@ class ClientHandler implements Runnable {
             } 
           }
         } else if (fromUser.equalsIgnoreCase("LPOP")) {
+          String key = null;
+          String len = null;
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
               continue;
             }
-           
-            if (!rmap.containsKey(fromUser) || rmap.get(fromUser).size()==0) {
-              outputStream.write("$-1\r\n".getBytes());
+            if (key == null) {
+              key = fromUser;
+            
+              if (!rmap.containsKey(key) || rmap.get(key).size()==0) {
+                outputStream.write("$-1\r\n".getBytes());
+                outputStream.flush();
+                break;
+              } 
+              argVar -= 1;
+              if (argVar == 0) {
+                String val = rmap.get(key).getFirst();
+                rmap.get(key).removeFirst();
+                outputStream.write(("$"+val.length()+"\r\n"+val+"\r\n").getBytes());
+                outputStream.flush();
+                break;
+              }
+            } else if (key != null && len == null) {
+              len = fromUser;
+              int intLen = Integer.parseInt(len);
+              intLen = Math.min(intLen, rmap.get(key).size());
+              StringBuilder res = new StringBuilder();
+              res.append("*"+intLen+"\r\n");
+              while (intLen > 0) {
+                String val = rmap.get(key).getFirst();
+                rmap.get(key).removeFirst();
+                res.append("$"+val.length()+"\r\n");
+                res.append(val+"\r\n");
+                intLen -= 1;
+              }
+              outputStream.write(res.toString().getBytes());
               outputStream.flush();
               break;
-            } else {
-              String res = rmap.get(fromUser).getFirst();
-              rmap.get(fromUser).removeFirst();
-              outputStream.write(("$" + res.length() + "\r\n" + res + "\r\n").getBytes());
-              outputStream.flush();
-              break;
-            } 
+            }
           }
         }
       }
