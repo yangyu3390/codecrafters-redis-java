@@ -12,7 +12,7 @@ import java.util.ArrayList;
 class ClientHandler implements Runnable {
   private Socket socket;
   private Map<String, String> map = new HashMap<>();
-  private List<String> list = new ArrayList<>();
+  private Map<String, List<String>> rmap = new HashMap<>();
   public ClientHandler(Socket socket) {
     this.socket = socket;
   }
@@ -123,16 +123,28 @@ class ClientHandler implements Runnable {
             break;
           }
         } else if (fromUser.equalsIgnoreCase("RPUSH")) {
+          String firstKey = null;
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
               // This is RESP metadata, ignore it
               continue;
             }
-            list.add(fromUser);
-            String res = ":" + Integer.toString(list.size())+"\r\n";
-            outputStream.write(res.getBytes());
-            outputStream.flush();
-            break;
+            if (firstKey == null) {
+              firstKey = fromUser;
+              if (!rmap.containsKey(firstKey)) {
+                rmap.put(fromUser, new ArrayList<String>());
+              } 
+            } else {
+              List<String> val = rmap.get(firstKey);
+              val.add(fromUser);
+            }
+            argVar -= 1;
+            if(argVar == 0) {
+              String res = ":" + Integer.toString(rmap.get(firstKey).size())+"\r\n";
+              outputStream.write(res.getBytes());
+              outputStream.flush();
+              break;
+            }
           }
         }
       }
