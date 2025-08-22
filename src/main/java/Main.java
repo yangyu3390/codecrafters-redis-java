@@ -6,13 +6,15 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Stack;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Deque;
 
 class ClientHandler implements Runnable {
   private Socket socket;
   private Map<String, String> map = new HashMap<>();
-  private Map<String, List<String>> rmap = new HashMap<>();
+  private Map<String, Stack<String>> rmap = new HashMap<>();
   public ClientHandler(Socket socket) {
     this.socket = socket;
   }
@@ -132,11 +134,35 @@ class ClientHandler implements Runnable {
             if (firstKey == null) {
               firstKey = fromUser;
               if (!rmap.containsKey(firstKey)) {
-                rmap.put(fromUser, new ArrayList<String>());
+                rmap.put(fromUser, new Stack<String>());
               } 
             } else {
-              List<String> val = rmap.get(firstKey);
-              val.add(fromUser);
+              Stack<String> val = rmap.get(firstKey);
+              val.addLast(fromUser);
+            }
+            argVar -= 1;
+            if(argVar == 0) {
+              String res = ":" + Integer.toString(rmap.get(firstKey).size())+"\r\n";
+              outputStream.write(res.getBytes());
+              outputStream.flush();
+              break;
+            }
+          }
+        } else if (fromUser.equalsIgnoreCase("LPUSH")) {
+          String firstKey = null;
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+            if (firstKey == null) {
+              firstKey = fromUser;
+              if (!rmap.containsKey(firstKey)) {
+                rmap.put(fromUser, new Stack<String>());
+              } 
+            } else {
+              Stack<String> val = rmap.get(firstKey);
+              val.addFirst(fromUser);
             }
             argVar -= 1;
             if(argVar == 0) {
