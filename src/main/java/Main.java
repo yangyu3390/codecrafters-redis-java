@@ -6,12 +6,13 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
-import java.time.Instant;
+import java.util.List;
+import java.util.ArrayList;
 
 class ClientHandler implements Runnable {
   private Socket socket;
   private Map<String, String> map = new HashMap<>();
-  
+  private List<String> list = new ArrayList<>();
   public ClientHandler(Socket socket) {
     this.socket = socket;
   }
@@ -118,6 +119,18 @@ class ClientHandler implements Runnable {
               }
             }
             outputStream.write(value.getBytes());
+            outputStream.flush();
+            break;
+          }
+        } else if (fromUser.equalsIgnoreCase("RPUSH")) {
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+            list.add(fromUser);
+            String res = ":" + Integer.toString(list.size())+"\r\n";
+            outputStream.write(res.getBytes());
             outputStream.flush();
             break;
           }
