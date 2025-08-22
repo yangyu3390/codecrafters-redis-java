@@ -241,7 +241,24 @@ class ClientHandler implements Runnable {
               outputStream.flush();
               break;
             }
-
+          }
+        } else if (fromUser.equalsIgnoreCase("LLEN")) {
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+           
+            if (!rmap.containsKey(fromUser)) {
+              outputStream.write(":0\r\n".getBytes());
+              outputStream.flush();
+              break;
+            } else {
+              int len = rmap.get(fromUser).size();
+              outputStream.write((":" + len + "\r\n").getBytes());
+              outputStream.flush();
+              break;
+            } 
           }
         }
       }
