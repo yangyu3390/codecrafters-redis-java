@@ -342,6 +342,7 @@ class ClientHandler implements Runnable {
         } else if (fromUser.equalsIgnoreCase("BLPOP")) {
           String key = null;
           String timeout = null;
+          boolean resGenerated = false;
           lock.lock();
           while ((fromUser=in.readLine())!=null) {
             if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
@@ -368,19 +369,31 @@ class ClientHandler implements Runnable {
                   } // 
                 } else {
                   try {
-                    notEmpty.awaitNanos((long)(doubleTimeout * 1_000_000_000L));
+                    long nanos = notEmpty.awaitNanos((long)(doubleTimeout * 1_000_000_000L));
+                    if (nanos <= 0) {
+                      outputStream.write(("$-1\r\n").getBytes());
+                      outputStream.flush();
+                      resGenerated = true;
+                    } else {
+                      resGenerated = false;
+                    }
+                    break;              
                   } catch (InterruptedException e) {
                     // TODO Auto-generated catch block
                     e.printStackTrace();
                   }
                 }
               }
-              
+              if(resGenerated) {
+                lock.unlock();
+                break;
+              }
               String res = rmap.get(key).pop();
               int resLen = res.length();
               
               outputStream.write(("*2\r\n"+"$"+key.length()+"\r\n"+key+"\r\n"+"$"+resLen+"\r\n"+res+"\r\n").getBytes());
               outputStream.flush();
+              lock.unlock();
               break;
             }
           }
