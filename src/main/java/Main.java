@@ -260,6 +260,25 @@ class ClientHandler implements Runnable {
               break;
             } 
           }
+        } else if (fromUser.equalsIgnoreCase("LPOP")) {
+          while ((fromUser=in.readLine())!=null) {
+            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+              // This is RESP metadata, ignore it
+              continue;
+            }
+           
+            if (!rmap.containsKey(fromUser) || rmap.get(fromUser).size()==0) {
+              outputStream.write("$-1\r\n".getBytes());
+              outputStream.flush();
+              break;
+            } else {
+              String res = rmap.get(fromUser).getFirst();
+              rmap.get(fromUser).removeFirst();
+              outputStream.write(("$" + res.length() + "\r\n" + res + "\r\n").getBytes());
+              outputStream.flush();
+              break;
+            } 
+          }
         }
       }
     } catch (IOException e) {
