@@ -5,406 +5,552 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.HashMap;
-import java.util.Map;
-import java.util.Stack;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
-
 class ClientHandler implements Runnable {
-  private Socket socket;
-  private static final Map<String, String> map = new ConcurrentHashMap<>();
-  private static final Map<String, Stack<String>> rmap = new ConcurrentHashMap<>();
-  static final ReentrantLock lock = new ReentrantLock();
-  static final Condition notEmpty = lock.newCondition();
-  public ClientHandler(Socket socket) {
-    this.socket = socket;
-  }
+    private Socket socket;
+    private static final Map<String, String> map = new ConcurrentHashMap<>();
+    private static final Map<String, Deque<String>> rmap = new ConcurrentHashMap<>();
+    static final ReentrantLock lock = new ReentrantLock();
+private static final Map<String, ArrayDeque<CompletableFuture<String>>> blockedClients = new ConcurrentHashMap<>();
+    
+    static class Expiry {
+        long timestamp;
+        long durationMs;
+        Expiry(long timestamp, long durationMs) {
+            this.timestamp = timestamp;
+            this.durationMs = durationMs;
+        }
+    }
+    private Map<String, Expiry> time = new HashMap<>();
+    
+    public ClientHandler(Socket socket) {
+        this.socket = socket;
+    }
 
-  static class Expiry {
-      long timestamp;
-      long durationMs;
-      Expiry(long timestamp, long durationMs) {
-          this.timestamp = timestamp;
-          this.durationMs = durationMs;
-      }
-  }
-  private Map<String, Expiry> time = new HashMap<>();
-  @Override
-  public void run() {    
-    try (
-      BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-      OutputStream outputStream = socket.getOutputStream();
-    ) {
-      String fromUser;     
-      int argVar = 0;
-      while ((fromUser=in.readLine())!=null) {
-        
-        if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-          // This is RESP metadata, ignore it
-          if (fromUser.startsWith("*")) {
-            // minus 1 for the SET command
-            argVar = Integer.parseInt(fromUser.substring(1))-1;
-          }
-          continue;
-        } else if (fromUser.equalsIgnoreCase("PING")) {
-          outputStream.write("+PONG\r\n".getBytes());
-        } else if (fromUser.equalsIgnoreCase("ECHO")) {
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
-            }
-            String resp = "+" + fromUser + "\r\n";
-            outputStream.write(resp.getBytes());
-            outputStream.flush();
-            break;
-          }
-        } else if (fromUser.equalsIgnoreCase("SET")) {
-          boolean keyFound = false;
-          boolean valueFound = false;
-          boolean pxFound = false;
-          String key = null;
-          String value;
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
-            }
-            if (!keyFound) {
-              argVar -= 1;
-              keyFound = true;
-              key = fromUser;
-            } else if (!valueFound){
-              argVar -= 1;
-              valueFound = true;
-              value = "$" + Integer.toString(fromUser.length()) + "\r\n" + fromUser + "\r\n";
-              map.put(key, value);
-              // System.out.println("!!!set value "+ value);
-              // System.out.println("!!!get "+ map.get(key));
-              String resp = "+OK\r\n";
-              outputStream.write(resp.getBytes());
-              outputStream.flush();
-              
-              if (argVar == 0) {
-                break;
-              }
-            } else if (!pxFound && fromUser.equalsIgnoreCase("px")) {
-              pxFound = true;
-              argVar -= 1;
-            } else if (pxFound && argVar==1) {
-              argVar -= 1;
-              long duration = Integer.parseInt(fromUser.substring(0));
-              long now = System.currentTimeMillis();
-              time.put(key, new Expiry(now, duration));
-              break;
-            }
-          }
-        } else if (fromUser.equalsIgnoreCase("GET")) {
-          String value;
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
-            }
-            value = map.getOrDefault(fromUser, "$-1\r\n");
-            if (!value.equals("$-1\r\n")) {
-              Expiry ex = time.get(fromUser);
-              if (ex != null) {
-                long timestamp = ex.timestamp;
-                long durationMs = ex.durationMs;
-                long currentTime = System.currentTimeMillis();
-                if (currentTime > timestamp + durationMs) {
-                    System.out.println("Expired");
-                    value = "$-1\r\n";
-                } else {
-                    System.out.println("Still valid");
+    @Override
+    public void run() {    
+        try (
+            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            OutputStream outputStream = socket.getOutputStream();
+        ) {
+            String fromUser;     
+            int argVar = 0;
+            while ((fromUser = in.readLine()) != null) {
+                if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
+                    if (fromUser.startsWith("*")) {
+                        argVar = Integer.parseInt(fromUser.substring(1)) - 1;
+                    }
+                    continue;
                 }
-              }
+                
+                switch (fromUser.toUpperCase()) {
+                    case "PING":
+                        outputStream.write("+PONG\r\n".getBytes());
+                        break;
+                    case "ECHO":
+                        handleEcho(in, outputStream);
+                        break;
+                    case "SET":
+                        handleSet(in, outputStream, argVar);
+                        break;
+                    case "GET":
+                        handleGet(in, outputStream);
+                        break;
+                    case "RPUSH":
+                        handleRpush(in, outputStream, argVar);
+                        break;
+                    case "LPUSH":
+                        handleLpush(in, outputStream, argVar);
+                        break;
+                    case "LRANGE":
+                        handleLrange(in, outputStream);
+                        break;
+                    case "LLEN":
+                        handleLlen(in, outputStream);
+                        break;
+                    case "LPOP":
+                        handleLpop(in, outputStream, argVar);
+                        break;
+                    case "BLPOP":
+                        handleBlpop(in, outputStream);
+                        break;
+                    default:
+                        outputStream.write("-ERR unknown command\r\n".getBytes());
+                }
+                outputStream.flush();
+            }
+        } catch (Exception e) {
+            System.out.println("Error handling client: " + e);
+            e.printStackTrace();
+        }
+    }
+
+    private void handleEcho(BufferedReader in, OutputStream outputStream) throws IOException {
+        String line;
+        while ((line = in.readLine()) != null) {
+            if (line.startsWith("*") || line.startsWith("$")) {
+                continue;
+            }
+            String resp = "+" + line + "\r\n";
+            outputStream.write(resp.getBytes());
+            break;
+        }
+    }
+
+    private void handleSet(BufferedReader in, OutputStream outputStream, int argVar) throws IOException {
+        String line;
+        String key = null;
+        String value = null;
+        long duration = -1;
+        boolean pxFound = false;
+        
+        while (argVar > 0 && (line = in.readLine()) != null) {
+            if (line.startsWith("*") || line.startsWith("$")) {
+                continue;
+            }
+            
+            if (key == null) {
+                key = line;
+                argVar--;
+            } else if (value == null) {
+                value = "$" + line.length() + "\r\n" + line + "\r\n";
+                map.put(key, value);
+                argVar--;
+                
+                if (argVar == 0) {
+                    outputStream.write("+OK\r\n".getBytes());
+                    break;
+                }
+            } else if (line.equalsIgnoreCase("px")) {
+                pxFound = true;
+                argVar--;
+            } else if (pxFound && duration == -1) {
+                try {
+                    duration = Long.parseLong(line);
+                    long now = System.currentTimeMillis();
+                    time.put(key, new Expiry(now, duration));
+                    outputStream.write("+OK\r\n".getBytes());
+                    break;
+                } catch (NumberFormatException e) {
+                    outputStream.write("-ERR invalid timeout\r\n".getBytes());
+                    break;
+                }
+            }
+        }
+    }
+
+    private void handleGet(BufferedReader in, OutputStream outputStream) throws IOException {
+        String line;
+        while ((line = in.readLine()) != null) {
+            if (line.startsWith("*") || line.startsWith("$")) {
+                continue;
+            }
+            
+            String value = map.getOrDefault(line, "$-1\r\n");
+            if (!value.equals("$-1\r\n")) {
+                Expiry ex = time.get(line);
+                if (ex != null) {
+                    long currentTime = System.currentTimeMillis();
+                    if (currentTime > ex.timestamp + ex.durationMs) {
+                        value = "$-1\r\n";
+                        map.remove(line);
+                        time.remove(line);
+                    }
+                }
             }
             outputStream.write(value.getBytes());
-            outputStream.flush();
             break;
-          }
-        } else if (fromUser.equalsIgnoreCase("RPUSH")) {
-          String firstKey = null;
-          lock.lock();
-          
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
+        }
+    }
+    private void handleLpush(BufferedReader in, OutputStream outputStream, int argVar) throws IOException {
+        String line;
+        String firstKey = null;
+        int res = 0;
+        
+        lock.lock();
+        try {
+            while (argVar > 0 && (line = in.readLine()) != null) {
+                if (line.startsWith("*") || line.startsWith("$")) {
+                    continue;
+                }
+                
+                if (firstKey == null) {
+                    firstKey = line;
+                    rmap.computeIfAbsent(firstKey, k -> new ArrayDeque<>());
+                } else {
+                    Deque<String> queue = rmap.get(firstKey);
+                    queue.addFirst(line);
+                    res = queue.size();
+                }
+                argVar--;
             }
-            if (firstKey == null) {
-              firstKey = fromUser;
-              if (!rmap.containsKey(firstKey)) {
-                rmap.put(fromUser, new Stack<String>());
-              } 
-            } else {
-              Stack<String> val = rmap.get(firstKey);
-              val.addLast(fromUser);
+            
+            // Notify blocked clients if any
+            if (firstKey != null) {
+                ArrayDeque<CompletableFuture<String>> blockedQueue = blockedClients.get(firstKey);
+                if (blockedQueue != null && !blockedQueue.isEmpty()) {
+                    Deque<String> valueQueue = rmap.get(firstKey);
+                    if (valueQueue != null && !valueQueue.isEmpty()) {
+                        CompletableFuture<String> clientFuture = blockedQueue.pollFirst();
+                        String element = valueQueue.pollFirst();
+                        if (element != null && clientFuture != null) {
+                            clientFuture.complete(element);
+                        }
+                    }
+                }
             }
-            argVar -= 1;
-            if(argVar == 0) {
-              String res = ":" + Integer.toString(rmap.get(firstKey).size())+"\r\n";
-              outputStream.write(res.getBytes());
-              outputStream.flush();
-              try {
-                notEmpty.signalAll(); // wake up all waiting threads
-              } finally {
-                  lock.unlock();
-              }
-              break;
-            }
-          }
-        } else if (fromUser.equalsIgnoreCase("LPUSH")) {
-          String firstKey = null;
-          lock.lock();
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
-            }
-            if (firstKey == null) {
-              firstKey = fromUser;
-              if (!rmap.containsKey(firstKey)) {
-                rmap.put(fromUser, new Stack<String>());
-              } 
-            } else {
-              Stack<String> val = rmap.get(firstKey);
-              val.addFirst(fromUser);
-            }
-            argVar -= 1;
-            if(argVar == 0) {
-              String res = ":" + Integer.toString(rmap.get(firstKey).size())+"\r\n";
-              outputStream.write(res.getBytes());
-              outputStream.flush();
-              try {
-                notEmpty.signalAll(); // wake up all waiting threads
-              } finally {
-                  lock.unlock();
-              }
-              break;
-            }
-          }
-        } else if (fromUser.equalsIgnoreCase("LRANGE")) {
-          String empty = "*0\r\n";
-          String startIdx = null;
-          String endIdx = null;
-          String key = null;
-          int listLen = 0;
-          lock.lock();
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
+        } finally {
+            lock.unlock();
+        }
+        
+        outputStream.write((":" + res + "\r\n").getBytes());
+    }
+
+    private void handleLrange(BufferedReader in, OutputStream outputStream) throws IOException {
+        String line;
+        String key = null;
+        String startStr = null;
+        String endStr = null;
+        
+        // Read all parameters first
+        int paramsRead = 0;
+        while (paramsRead < 3 && (line = in.readLine()) != null) {
+            if (line.startsWith("*") || line.startsWith("$")) {
+                continue; // Skip metadata lines
             }
             
             if (key == null) {
-              key = fromUser;
-              if (!rmap.containsKey(fromUser)) {
-                outputStream.write(empty.getBytes());
-                outputStream.flush();
-                break;
-              }
-              listLen = rmap.get(key).size();
-            } else if (startIdx == null) {
-              startIdx = fromUser;
-              if (Integer.parseInt(startIdx) < 0) {
-                if (-Integer.parseInt(startIdx)>=listLen) {
-                  startIdx = "0";
-                } else {
-                  int len = Integer.parseInt(startIdx) + listLen;
-                  startIdx = Integer.toString(len);
-                }
-              }
-              if (Integer.parseInt(startIdx)>=listLen) {
-                outputStream.write(empty.getBytes());
-                outputStream.flush();
-                
-                lock.unlock();
-                
-                break;
-              }
-              
-            } else if (endIdx == null) {
-              endIdx = fromUser;
-              if (Integer.parseInt(endIdx) < 0) {
-                if (-Integer.parseInt(endIdx)>=listLen) {
-                  endIdx = "0";
-                } else {
-                  int len = Integer.parseInt(endIdx) + listLen;
-                  endIdx = Integer.toString(len);
-                }
-              }
-              if (Integer.parseInt(endIdx)>=listLen) {
-                endIdx = Integer.toString(listLen-1);
-              } 
-              if (Integer.parseInt(startIdx) > Integer.parseInt(endIdx)) {
-                outputStream.write(empty.getBytes());
-                outputStream.flush();
-                
-                lock.unlock();
-                
-                break;
-              }
-              int startIntIdx = Integer.parseInt(startIdx);
-              int endIntIdx = Integer.parseInt(endIdx);
-              StringBuilder res = new StringBuilder();
-              int len = endIntIdx - startIntIdx + 1;
-              res.append("*"+len+"\r\n");
-              for(int i = startIntIdx; i <= endIntIdx; i++) {
-                String val = rmap.get(key).get(i);
-                int valLen = val.length();
-                res.append("$"+valLen+"\r\n");
-                res.append(val+"\r\n");
-              }
-              outputStream.write(res.toString().getBytes());
-              outputStream.flush();
-              
-              lock.unlock();
-              
-              break;
+                key = line;
+                paramsRead++;
+            } else if (startStr == null) {
+                startStr = line;
+                paramsRead++;
+            } else if (endStr == null) {
+                endStr = line;
+                paramsRead++;
             }
-          }
-        } else if (fromUser.equalsIgnoreCase("LLEN")) {
-          lock.lock();
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
+        }
+        
+        if (key == null || startStr == null || endStr == null) {
+            outputStream.write("-ERR wrong number of arguments for LRANGE\r\n".getBytes());
+            return;
+        }
+        
+        int start, end;
+        try {
+            start = Integer.parseInt(startStr);
+            end = Integer.parseInt(endStr);
+        } catch (NumberFormatException e) {
+            outputStream.write("-ERR value is not an integer or out of range\r\n".getBytes());
+            return;
+        }
+        
+        lock.lock();
+        try {
+            Deque<String> queue = rmap.get(key);
+            if (queue == null || queue.isEmpty()) {
+                outputStream.write("*0\r\n".getBytes());
+                return;
             }
-           
-            if (!rmap.containsKey(fromUser)) {
-              outputStream.write(":0\r\n".getBytes());
-              outputStream.flush();
-              
-              lock.unlock();
-              
-              break;
-            } else {
-              int len = rmap.get(fromUser).size();
-              outputStream.write((":" + len + "\r\n").getBytes());
-              outputStream.flush();
-              lock.unlock();
-              break;
-            } 
-          }
-        } else if (fromUser.equalsIgnoreCase("LPOP")) {
-          String key = null;
-          String len = null;
-          lock.lock();
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
-            }
-            if (key == null) {
-              key = fromUser;
             
-              if (!rmap.containsKey(key) || rmap.get(key).size()==0) {
+            int size = queue.size();
+            // Handle negative indices
+            if (start < 0) start = size + start;
+            if (end < 0) end = size + end;
+            start = Math.max(0, start);
+            end = Math.min(size - 1, end);
+            
+            if (start > end) {
+                outputStream.write("*0\r\n".getBytes());
+                return;
+            }
+            
+            StringBuilder result = new StringBuilder();
+            int count = end - start + 1;
+            result.append("*").append(count).append("\r\n");
+            
+            Object[] elements = queue.toArray();
+            for (int i = start; i <= end; i++) {
+                String element = (String) elements[i];
+                result.append("$").append(element.length()).append("\r\n");
+                result.append(element).append("\r\n");
+            }
+            
+            outputStream.write(result.toString().getBytes());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void handleLlen(BufferedReader in, OutputStream outputStream) throws IOException {
+        String line;
+        
+        lock.lock();
+        try {
+            while ((line = in.readLine()) != null) {
+                if (line.startsWith("*") || line.startsWith("$")) {
+                    continue;
+                }
+                
+                Deque<String> queue = rmap.get(line);
+                int len = (queue == null) ? 0 : queue.size();
+                outputStream.write((":" + len + "\r\n").getBytes());
+                break;
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void handleLpop(BufferedReader in, OutputStream outputStream, int argVar) throws IOException {
+        String line;
+        String key = null;
+        int count = 1;
+        
+        lock.lock();
+        try {
+            while ((line = in.readLine()) != null) {
+                if (line.startsWith("*") || line.startsWith("$")) {
+                    continue;
+                }
+                
+                if (key == null) {
+                    key = line;
+                    argVar--;
+                    
+                    if (argVar == 0) {
+                        Deque<String> queue = rmap.get(key);
+                        if (queue == null || queue.isEmpty()) {
+                            outputStream.write("$-1\r\n".getBytes());
+                            return;
+                        }
+                        
+                        String value = queue.pollFirst();
+                        outputStream.write(("$" + value.length() + "\r\n" + value + "\r\n").getBytes());
+                        return;
+                    }
+                } else {
+                    try {
+                        count = Integer.parseInt(line);
+                    } catch (NumberFormatException e) {
+                        outputStream.write("-ERR invalid count\r\n".getBytes());
+                        return;
+                    }
+                    
+                    Deque<String> queue = rmap.get(key);
+                    if (queue == null || queue.isEmpty()) {
+                        outputStream.write("*0\r\n".getBytes());
+                        return;
+                    }
+                    
+                    count = Math.min(count, queue.size());
+                    StringBuilder result = new StringBuilder();
+                    result.append("*").append(count).append("\r\n");
+                    
+                    for (int i = 0; i < count; i++) {
+                        String value = queue.pollFirst();
+                        result.append("$").append(value.length()).append("\r\n");
+                        result.append(value).append("\r\n");
+                    }
+                    
+                    outputStream.write(result.toString().getBytes());
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void handleBlpop(BufferedReader in, OutputStream outputStream) throws IOException {
+        String line;
+        String key = null;
+        double timeout = 0;
+        lock.lock();
+        // Parse key and timeout
+        while ((line = in.readLine()) != null) {
+            if (line.startsWith("*") || line.startsWith("$")) {
+                continue;
+            }
+
+            if (key == null) {
+                key = line;
+            } else {
+                try {
+                    timeout = Double.parseDouble(line);
+                    break;
+                } catch (NumberFormatException e) {
+                    outputStream.write("-ERR invalid timeout\r\n".getBytes());
+                    outputStream.flush();
+                    return;
+                }
+            }
+        }
+        
+        CompletableFuture<String> future = new CompletableFuture<>();
+        boolean immediateResponse = false;
+        String immediateValue = null;
+
+        
+        try {
+            Deque<String> queue = rmap.get(key);
+            if (queue != null && !queue.isEmpty()) {
+                immediateResponse = true;
+                immediateValue = queue.pollFirst();  // serve immediately
+            } else {
+                // No element → block this client
+                System.out.println("@@@BLPOP key "+key + " future "+future+" key exists "+blockedClients.containsKey(key));
+                blockedClients.computeIfAbsent(key, k -> new ArrayDeque<>()).add(future);
+            }
+        } finally {
+            lock.unlock();
+        }
+
+        if (immediateResponse) {
+            try {
+                outputStream.write(("*2\r\n$" + key.length() + "\r\n" + key +
+                                    "\r\n$" + immediateValue.length() + "\r\n" +
+                                    immediateValue + "\r\n").getBytes());
+                outputStream.flush();
+            } catch (IOException e) {
+                // Client disconnected
+            }
+            return;
+        }
+
+        try {
+            String value;
+            if (timeout == 0) {
+                System.out.println("@@@BLPOP future wait "+future);
+                value = future.get(); // wait forever
+            } else {
+                value = future.get((long) (timeout * 1000), TimeUnit.MILLISECONDS);
+            }
+
+            outputStream.write(("*2\r\n$" + key.length() + "\r\n" + key +
+                                "\r\n$" + value.length() + "\r\n" +
+                                value + "\r\n").getBytes());
+            outputStream.flush();
+        } catch (TimeoutException e) {
+            // Remove this future if still pending
+            System.out.println("@@@BLPOP timeout");
+            lock.lock();
+            try {
+                Deque<CompletableFuture<String>> blockedQueue = blockedClients.get(key);
+                if (blockedQueue != null) {
+                    blockedQueue.remove(future);
+                    if (blockedQueue.isEmpty()) {
+                        blockedClients.remove(key);
+                    }
+                }
+            } finally {
+                lock.unlock();
+            }
+
+            try {
+                outputStream.write("$-1\r\n".getBytes());  // ✅ correct RESP for null bulk string
+                outputStream.flush();
+            } catch (IOException ignored) {}
+        } catch (Exception e) {
+            // Cleanup on error
+            System.out.println("@@@BLPOP Exception");
+            lock.lock();
+            try {
+                Deque<CompletableFuture<String>> blockedQueue = blockedClients.get(key);
+                if (blockedQueue != null) {
+                    blockedQueue.remove(future);
+                    if (blockedQueue.isEmpty()) {
+                        blockedClients.remove(key);
+                    }
+                }
+            } finally {
+                lock.unlock();
+            }
+
+            try {
                 outputStream.write("$-1\r\n".getBytes());
                 outputStream.flush();
-                lock.unlock();
-                break;
-              } 
-              argVar -= 1;
-              if (argVar == 0) {
-                String val = rmap.get(key).getFirst();
-                rmap.get(key).removeFirst();
-                outputStream.write(("$"+val.length()+"\r\n"+val+"\r\n").getBytes());
-                outputStream.flush();
-                lock.unlock();
-                break;
-              }
-            } else if (key != null && len == null) {
-              len = fromUser;
-              int intLen = Integer.parseInt(len);
-              intLen = Math.min(intLen, rmap.get(key).size());
-              StringBuilder res = new StringBuilder();
-              res.append("*"+intLen+"\r\n");
-              while (intLen > 0) {
-                String val = rmap.get(key).getFirst();
-                rmap.get(key).removeFirst();
-                res.append("$"+val.length()+"\r\n");
-                res.append(val+"\r\n");
-                intLen -= 1;
-              }
-              outputStream.write(res.toString().getBytes());
-              outputStream.flush();
-              lock.unlock();
-              break;
-            }
-          }
-        } else if (fromUser.equalsIgnoreCase("BLPOP")) {
-          String key = null;
-          String timeout = null;
-          boolean resGenerated = false;
-          lock.lock();
-          while ((fromUser=in.readLine())!=null) {
-            if (fromUser.startsWith("*") || fromUser.startsWith("$")) {
-              // This is RESP metadata, ignore it
-              continue;
-            }
-            if (key == null) {
-              key = fromUser;
-              // if (!rmap.containsKey(key) || rmap.get(key).size()==0) {
-              //   outputStream.write("$-1\r\n".getBytes());
-              //   outputStream.flush();
-              //   break;
-              // } 
-            } else if (key != null && timeout == null) {
-              timeout = fromUser;
-              double doubleTimeout = Double.parseDouble(timeout);
-              while (!rmap.containsKey(key)){
-                if (doubleTimeout-0.0 < 0.0000001) {
-                  try {
-                    notEmpty.await();
-                  } catch (InterruptedException e) {
-                    // TODO Auto-generated catch block
-                    e.printStackTrace();
-                  } // 
-                } else {
-                  try {
-                    long nanos = notEmpty.awaitNanos((long)(doubleTimeout * 1_000_000_000L));
-                    if (nanos <= 0) {
-                      outputStream.write(("$-1\r\n").getBytes());
-                      outputStream.flush();
-                      resGenerated = true;
-                    } else {
-                      resGenerated = false;
-                    }
-                    break;              
-                  } catch (InterruptedException e) {
-                    // TODO Auto-generated catch block
-                    e.printStackTrace();
-                  }
-                }
-              }
-              if(resGenerated) {
-                lock.unlock();
-                break;
-              }
-              String res = rmap.get(key).pop();
-              int resLen = res.length();
-              
-              outputStream.write(("*2\r\n"+"$"+key.length()+"\r\n"+key+"\r\n"+"$"+resLen+"\r\n"+res+"\r\n").getBytes());
-              outputStream.flush();
-              lock.unlock();
-              break;
-            }
-          }
+            } catch (IOException ignored) {}
         }
-      }
-    } catch (IOException e) {
-      // TODO Auto-generated catch block
-      e.printStackTrace();
     }
-  }
+
+    private void handleRpush(BufferedReader in, OutputStream outputStream, int argVar) throws IOException {
+        String line;
+        String firstKey = null;
+        int res = 0;
+        List<String> values = new ArrayList<>();
+        lock.lock();
+        // Parse all values
+        while (argVar > 0 && (line = in.readLine()) != null) {
+            if (line.startsWith("*") || line.startsWith("$")) {
+                continue;
+            }
+
+            if (firstKey == null) {
+                firstKey = line;
+            } else {
+                values.add(line);
+            }
+            argVar--;
+        }
+
+       
+        try {
+            Deque<String> queue = rmap.computeIfAbsent(firstKey, k -> new ArrayDeque<>());
+            for (String value : values) {
+                queue.addLast(value);
+            }
+            res = queue.size();  // ✅ final size of the list (no adjustment!)
+            // Notify blocked clients if any
+            Deque<CompletableFuture<String>> blockedQueue = blockedClients.get(firstKey);
+            
+            if (blockedQueue == null) {
+                System.out.println("@@@RPUSH blockedQueue is null");
+            }
+            if (blockedQueue != null && blockedQueue.isEmpty()) {
+                System.out.println("@@@RPUSH blockedQueue is empty");
+            }
+            if (queue.isEmpty()) {
+                System.out.println("@@@ RPUSH queue is empty ");
+            }
+            if (blockedQueue != null && !blockedQueue.isEmpty() && !queue.isEmpty()) {
+                CompletableFuture<String> clientFuture = blockedQueue.pollFirst();
+                String element = queue.pollFirst();  // give the earliest element
+                System.out.println("@@@ RPUSH element "+element+" future "+clientFuture);
+                if (clientFuture != null && element != null) {
+                    
+                    clientFuture.complete(element);
+                    System.out.println("@@@ RPUSH complete future "+clientFuture);
+                }
+            }
+            if (blockedQueue != null && blockedQueue.isEmpty()) {
+                blockedClients.remove(firstKey);
+            }
+
+            
+        } finally {
+            lock.unlock();
+        }
+
+        try {
+            outputStream.write((":" + res + "\r\n").getBytes());
+            outputStream.flush();
+        } catch (IOException ignored) {}
+    }
+
 }
+
 public class Main {
   public static void main(String[] args){
     // You can use print statements as follows for debugging, they'll be visible when running tests.
