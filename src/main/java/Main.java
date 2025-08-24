@@ -337,12 +337,12 @@ private static final Map<String, ArrayDeque<CompletableFuture<String>>> blockedC
         
     }
     private void handleBlpop(OutputStream outputStream, List<String> args) throws IOException {
-        if (args.size() != 2) {
-            outputStream.write("-ERR wrong number of arguments for 'blpop' command\r\n".getBytes());
-            outputStream.flush();
-            return;
-        }
-
+        // if (args.size() != 2) {
+        //     outputStream.write("-ERR wrong number of arguments for 'blpop' command\r\n".getBytes());
+        //     outputStream.flush();
+        //     return;
+        // }
+         lock.lock();
         String key = args.get(0);
         double timeout;
         try {
@@ -354,7 +354,7 @@ private static final Map<String, ArrayDeque<CompletableFuture<String>>> blockedC
         }
         
         // The rest of your core logic remains the same, but without any readLine() calls.
-        lock.lock();
+        // lock.lock();
         
         CompletableFuture<String> future = new CompletableFuture<>();
         boolean immediateResponse = false;
